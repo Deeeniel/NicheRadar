@@ -40,13 +40,13 @@ PLATFORM_KEYWORDS = {
 
 def parse_market(market: Market, now: datetime) -> ParsedMarket | None:
     title_lower = market.title.lower()
-    if not any(keyword in title_lower for keyword in SOCIAL_KEYWORDS):
-        return None
-
-    platform = "unknown"
     description_lower = market.description.lower()
     rules_lower = market.rules.lower()
     combined_text = f"{title_lower} {description_lower} {rules_lower}"
+    if not any(keyword in combined_text for keyword in SOCIAL_KEYWORDS):
+        return None
+
+    platform = "unknown"
     for name, aliases in PLATFORM_KEYWORDS.items():
         if _contains_alias(combined_text, aliases):
             platform = name
@@ -64,11 +64,11 @@ def parse_market(market: Market, now: datetime) -> ParsedMarket | None:
         event_type = "announcement"
         action = "announce"
     elif (
-        "release" in title_lower
-        or "released" in title_lower
-        or "upload" in title_lower
-        or "album" in title_lower
-        or "song" in title_lower
+        "release" in combined_text
+        or "released" in combined_text
+        or "upload" in combined_text
+        or "album" in combined_text
+        or "song" in combined_text
         or "gpt" in combined_text
         or "optimus" in combined_text
         or "macbook" in combined_text

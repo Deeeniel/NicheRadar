@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -21,6 +21,7 @@ class EvidenceSource:
     url: str
     keywords: list[str]
     reliability: float
+    bearish_keywords: list[str] = field(default_factory=list)
 
 
 class EvidenceCollector:
@@ -61,10 +62,12 @@ class EvidenceCollector:
 
         recent_entries = [entry for entry in entries if self._days_since(entry["published"], now) <= 30]
         keyword_hits = sum(1 for entry in recent_entries if self._entry_matches(entry, source.keywords))
+        bearish_hits = sum(1 for entry in recent_entries if self._entry_matches(entry, source.bearish_keywords))
         latest_age = min((self._days_since(entry["published"], now) for entry in recent_entries), default=365.0)
 
         cadence = min(0.95, len(recent_entries) / 10)
         preheat = min(0.95, keyword_hits / 3) if source.keywords else min(0.5, len(recent_entries) / 10)
+        bearish_score = min(0.95, bearish_hits / 3) if source.bearish_keywords else 0.0
         partner = self._partner_score(parsed)
         score = (preheat * 0.45) + (cadence * 0.35) + (partner * 0.20)
         confidence = min(0.95, 0.45 + source.reliability * 0.35 + min(0.15, len(recent_entries) * 0.01))
@@ -78,6 +81,13 @@ class EvidenceCollector:
             f"cadence_score={cadence:.2f}",
             f"partner_score={partner:.2f}",
             f"source_reliability={source.reliability:.2f}",
+            f"bearish_hits_30d={bearish_hits}",
+            f"bearish_score={bearish_score:.2f}",
+        ]
+        matched_items = [
+            {"title": entry["title"], "link": entry["link"]}
+            for entry in recent_entries
+            if self._entry_matches(entry, source.keywords)
         ]
         return Evidence(
             score=round(score, 4),
@@ -93,6 +103,9 @@ class EvidenceCollector:
             cadence_score=round(cadence, 4),
             partner_score=round(partner, 4),
             source_reliability=round(source.reliability, 4),
+            bearish_hits_30d=bearish_hits,
+            bearish_score=round(bearish_score, 4),
+            matched_items=matched_items,
         )
 
     def _find_source(self, parsed: ParsedMarket) -> EvidenceSource | None:
@@ -120,6 +133,7 @@ class EvidenceCollector:
                     url=str(row["url"]),
                     keywords=[str(item).lower() for item in row.get("keywords", [])],
                     reliability=float(row.get("reliability", 0.6)),
+                    bearish_keywords=[str(item).lower() for item in row.get("bearish_keywords", [])],
                 )
             )
         return sources
@@ -140,16 +154,22 @@ class EvidenceCollector:
                 {
                     "title": self._xml_text(item, "title"),
                     "summary": self._xml_text(item, "description"),
+                    "link": self._xml_text(item, "link"),
                     "published": self._parse_feed_date(self._xml_text(item, "pubDate")),
                 }
             )
 
         atom_ns = {"atom": "http://www.w3.org/2005/Atom"}
         for entry in root.findall(".//atom:entry", atom_ns):
+            link_node = entry.find("atom:link", atom_ns)
+            link = ""
+            if link_node is not None:
+                link = link_node.get("href", "")
             entries.append(
                 {
                     "title": self._xml_text(entry, "atom:title", atom_ns),
                     "summary": self._xml_text(entry, "atom:summary", atom_ns) or self._xml_text(entry, "atom:content", atom_ns),
+                    "link": link,
                     "published": self._parse_feed_date(
                         self._xml_text(entry, "atom:published", atom_ns) or self._xml_text(entry, "atom:updated", atom_ns)
                     ),
@@ -208,6 +228,8 @@ class EvidenceCollector:
         )
 
     def _entry_matches(self, entry: dict[str, Any], keywords: list[str]) -> bool:
+        if not keywords:
+            return False
         haystack = f"{entry['title']} {entry['summary']}".lower()
         return any(keyword in haystack for keyword in keywords)
 

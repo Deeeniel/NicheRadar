@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from bot.backtest_dataset import BacktestSample
-from bot.backtest_metrics import build_backtest_metrics, calibration_bins, reliability_status
+from bot.backtest.dataset import BacktestSample
+from bot.backtest.metrics import build_backtest_metrics, calibration_bins, reliability_status
 
 
 class BacktestMetricsTests(unittest.TestCase):

@@ -18,6 +18,8 @@ class ModelProfile:
     partner_weight: float
     time_weight: float
     spread_penalty_weight: float
+    min_confidence: float
+    bearish_weight: float
 
 
 MODEL_PROFILES: dict[str, ModelProfile] = {
@@ -31,6 +33,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         partner_weight=0.20,
         time_weight=1.10,
         spread_penalty_weight=0.50,
+        min_confidence=0.50,
+        bearish_weight=1.20,
     ),
     "product_release": ModelProfile(
         name="product_release",
@@ -42,6 +46,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         partner_weight=0.55,
         time_weight=0.75,
         spread_penalty_weight=0.65,
+        min_confidence=0.60,
+        bearish_weight=1.50,
     ),
     "ipo_event": ModelProfile(
         name="ipo_event",
@@ -53,6 +59,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         partner_weight=0.25,
         time_weight=0.60,
         spread_penalty_weight=0.55,
+        min_confidence=0.55,
+        bearish_weight=1.35,
     ),
     "default_content": ModelProfile(
         name="default_content",
@@ -64,6 +72,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         partner_weight=0.20,
         time_weight=1.00,
         spread_penalty_weight=0.50,
+        min_confidence=0.55,
+        bearish_weight=1.25,
     ),
 }
 
@@ -72,22 +82,33 @@ def build_signal(parsed: ParsedMarket, evidence: Evidence, config: BotConfig) ->
     market = parsed.market
     profile = _select_profile(parsed)
     time_bonus = _time_score(parsed.days_to_expiry) * profile.time_weight
-    market_penalty = max(0.0, market.spread - 0.06) * profile.spread_penalty_weight
     profile_evidence_score = _profile_evidence_score(evidence, profile)
-    evidence_effect = -profile_evidence_score if parsed.action.startswith("not_") else profile_evidence_score
-    evidence_effect *= profile.evidence_weight
-    model_logit = _base_logit(parsed, profile) + evidence_effect + time_bonus - market_penalty
+    bullish_effect = profile_evidence_score * profile.evidence_weight
+    bearish_effect = (evidence.bearish_score or 0.0) * profile.bearish_weight
+    
+    if parsed.action.startswith("not_"):
+        evidence_effect = bearish_effect - bullish_effect
+    else:
+        evidence_effect = bullish_effect - bearish_effect
+
+    model_logit = _base_logit(parsed, profile) + evidence_effect + time_bonus
     p_model = _sigmoid(model_logit)
     p_mid = market.mid_probability
     total_buffer = config.fee_buffer + config.uncertainty_buffer
 
-    yes_edge = p_model - p_mid
-    side = "BUY_YES" if yes_edge >= 0 else "BUY_NO"
+    yes_edge = p_model - market.mid_probability
+    no_edge = (1 - p_model) - market.no_mid_probability
+    yes_spread_penalty = max(0.0, market.spread - 0.06) * profile.spread_penalty_weight
+    no_spread_penalty = max(0.0, market.no_spread - 0.06) * profile.spread_penalty_weight
+    yes_net_edge = yes_edge - total_buffer - yes_spread_penalty
+    no_net_edge = no_edge - total_buffer - no_spread_penalty
+    side = "BUY_YES" if yes_net_edge >= no_net_edge else "BUY_NO"
     model_price = p_model if side == "BUY_YES" else 1 - p_model
     market_price = market.mid_for_side(side)
+    side_penalty = yes_spread_penalty if side == "BUY_YES" else no_spread_penalty
     edge = model_price - market_price
-    net_edge = edge - total_buffer
-    max_entry_price = model_price - total_buffer
+    net_edge = edge - total_buffer - side_penalty
+    max_entry_price = model_price - total_buffer - side_penalty
 
     reasons = [
         f"model_profile={profile.name}",
@@ -95,11 +116,16 @@ def build_signal(parsed: ParsedMarket, evidence: Evidence, config: BotConfig) ->
         f"platform={parsed.platform}",
         f"action={parsed.action}",
         f"profile_evidence_score={profile_evidence_score:.3f}",
+        f"bullish_effect={bullish_effect:.3f}",
+        f"bearish_effect={bearish_effect:.3f}",
         f"evidence_effect={evidence_effect:.3f}",
         f"time_bonus={time_bonus:.3f}",
         f"yes_mid={p_mid:.4f}",
+        f"yes_net_edge={yes_net_edge:.4f}",
+        f"no_net_edge={no_net_edge:.4f}",
         f"side_market_mid={market_price:.4f}",
         f"market_spread={market.spread_for_side(side):.3f}",
+        f"spread_penalty={side_penalty:.4f}",
         *evidence.reasons,
     ]
     return Signal(
@@ -112,6 +138,7 @@ def build_signal(parsed: ParsedMarket, evidence: Evidence, config: BotConfig) ->
         max_entry_price=round(max(0.01, max_entry_price), 4),
         confidence=evidence.confidence,
         reasons=reasons,
+        profile_name=profile.name,
     )
 
 

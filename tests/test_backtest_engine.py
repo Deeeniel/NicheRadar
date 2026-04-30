@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from bot.backtest_engine import BacktestStrategyParams, evaluate_shadow_entry
+from bot.backtest.engine import BacktestStrategyParams, evaluate_shadow_entry
 
 
 class BacktestEngineTests(unittest.TestCase):
@@ -25,10 +25,13 @@ class BacktestEngineTests(unittest.TestCase):
 
 def _snapshot() -> dict[str, object]:
     return {
+        "slug": "market",
+        "label": "Market",
         "market_ok": True,
         "signal_ok": True,
         "preferred_side": "BUY_NO",
         "model_side": "BUY_NO",
+        "title": "Will Artist release a new album?",
         "no_bid": 0.45,
         "no_ask": 0.46,
         "no_spread": 0.01,

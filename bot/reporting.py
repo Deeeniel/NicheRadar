@@ -4,16 +4,16 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import html
 import json
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from bot.backtest_dataset import load_backtest_samples
-from bot.backtest_reporting import build_backtest_report
+from bot.backtest.reporting import build_backtest_report
+from bot.backtest.replay import replay_shadow_pnl_from_positions
 from bot.config import BotConfig
-from bot.portfolio_risk import load_portfolio_risk_state, state_to_dict
-from bot.shadow_replay import Settlement, replay_shadow_pnl
+from bot.domain import SnapshotRecord, storage_row_payload
+from bot.report_data import load_dashboard_data
+from bot.risk_manager import portfolio_risk_state_from_positions, state_to_dict
+from bot.settlements import Settlement
 
 
 def build_dashboard_report(
@@ -24,15 +24,15 @@ def build_dashboard_report(
 ) -> dict[str, object]:
     config = config or BotConfig()
     settlements = settlements or []
-    with closing(sqlite3.connect(db_path)) as connection:
-        connection.row_factory = sqlite3.Row
-        snapshots = [_row_dict(row) for row in connection.execute("SELECT * FROM watchlist_snapshots ORDER BY id").fetchall()]
-        alerts = [_row_dict(row) for row in connection.execute("SELECT * FROM watchlist_alerts ORDER BY id").fetchall()]
-        fills = [_row_dict(row) for row in connection.execute("SELECT * FROM shadow_fills ORDER BY id").fetchall()]
-
-    replay = replay_shadow_pnl(db_path, settlements)
-    backtest = build_backtest_report(load_backtest_samples(db_path, settlements), db_path)
-    portfolio_state = load_portfolio_risk_state(db_path, config)
+    data = load_dashboard_data(db_path, settlements)
+    snapshots = data.snapshots
+    alerts = data.alerts
+    fills = data.fills
+    replay = replay_shadow_pnl_from_positions(data.positions)
+    backtest_samples = data.backtest_samples
+    backtest = build_backtest_report(backtest_samples, db_path)
+    portfolio_positions = [position for position in data.positions if position.status == "open"]
+    portfolio_state = portfolio_risk_state_from_positions(portfolio_positions, config)
     latest = _latest_snapshots_by_slug(snapshots)
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -56,12 +56,23 @@ def build_dashboard_report(
         "backtest_target_source_counts": backtest["target_source_counts"],
         "backtest_calibration_by_profile": backtest["calibration_by_profile"],
         "backtest_pnl_by_profile": backtest["pnl_by_profile"],
+        "backtest_combinatorial_buckets": backtest["combinatorial_buckets"],
         "portfolio_risk": state_to_dict(portfolio_state),
+        "health": {
+            "evidence_success_rate": _evidence_success_rate(snapshots),
+            "book_complete_rate": _book_complete_rate(snapshots),
+            "executable_snapshot_rate": _executable_snapshot_rate(snapshots),
+            "indicative_snapshot_count": _indicative_snapshot_count(snapshots),
+            "unsupported_market_count": _unsupported_market_count(snapshots),
+            "profile_settlement_coverage": _profile_settlement_coverage(backtest_samples),
+            "book_fetch_failure_distribution": _book_fetch_failure_distribution(snapshots),
+        }
     }
 
 
 def format_dashboard_report(report: dict[str, object]) -> list[str]:
     counts = _dict(report.get("counts"))
+    health = _dict(report.get("health"))
     lines = [
         "dashboard_report",
         f"db_path={report.get('db_path')}",
@@ -112,11 +123,36 @@ def format_dashboard_report(report: dict[str, object]) -> list[str]:
         "portfolio_risk "
         f"bankroll={_fmt(portfolio.get('bankroll'))} "
         f"open_positions={portfolio.get('open_positions', 0)} "
+        f"remaining_slots={portfolio.get('remaining_position_slots', 0)} "
         f"total_exposure={_fmt(portfolio.get('total_exposure'))} "
         f"total_exposure_pct={_fmt_pct(portfolio.get('total_exposure_pct'))} "
+        f"remaining_capacity={_fmt(portfolio.get('remaining_total_risk_capacity'))} "
         f"unrealized_pnl={_fmt(portfolio.get('unrealized_pnl'))} "
-        f"circuit_breaker={str(portfolio.get('circuit_breaker_active')).lower()}"
+        f"circuit_breaker={str(portfolio.get('circuit_breaker_active')).lower()} "
+        f"state_error={portfolio.get('state_load_error') or 'none'}"
     )
+    lines.append(
+        "data_quality "
+        f"evidence_success_rate={_fmt_pct(health.get('evidence_success_rate'))} "
+        f"book_complete_rate={_fmt_pct(health.get('book_complete_rate'))} "
+        f"executable_snapshot_rate={_fmt_pct(health.get('executable_snapshot_rate'))} "
+        f"indicative_snapshots={health.get('indicative_snapshot_count', 0)} "
+        f"unsupported_markets={health.get('unsupported_market_count', 0)}"
+    )
+    for row in _list(report.get("health", {}).get("profile_settlement_coverage")):
+        lines.append(
+            "profile_settlement_coverage "
+            f"profile={row.get('model_profile')} "
+            f"samples={row.get('samples')} "
+            f"settled={row.get('settled_samples')} "
+            f"coverage={_fmt_pct(row.get('settlement_coverage_pct'))}"
+        )
+    for row in _list(report.get("health", {}).get("book_fetch_failure_distribution")):
+        lines.append(
+            "book_fetch_failure "
+            f"source={row.get('source')} "
+            f"count={row.get('count')}"
+        )
     for row in _list(report.get("top_edges")):
         lines.append(
             "top_edge "
@@ -149,6 +185,7 @@ def write_dashboard_html(path: str, report: dict[str, object]) -> None:
 
 def _markdown_report(report: dict[str, object]) -> str:
     counts = _dict(report.get("counts"))
+    health = _dict(report.get("health"))
     lines = [
         "# PolyMarket Shadow Report",
         "",
@@ -165,11 +202,47 @@ def _markdown_report(report: dict[str, object]) -> str:
             f"{counts.get('alerts', 0)} | {counts.get('shadow_fills', 0)} | {counts.get('shadow_positions', 0)} |"
         ),
         "",
+        "## Data Quality",
+        "",
+        "| evidence success | complete books | executable snapshots | indicative snapshots | unsupported markets |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_pct(health.get('evidence_success_rate'))} | {_fmt_pct(health.get('book_complete_rate'))} | "
+            f"{_fmt_pct(health.get('executable_snapshot_rate'))} | {health.get('indicative_snapshot_count', 0)} | "
+            f"{health.get('unsupported_market_count', 0)} |"
+        ),
+        "",
+        "### Profile Settlement Coverage",
+        "",
+        "| profile | samples | settled | coverage |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for row in _list(health.get("profile_settlement_coverage")):
+        lines.append(
+            f"| {row.get('model_profile')} | {row.get('samples')} | {row.get('settled_samples')} | "
+            f"{_fmt_pct(row.get('settlement_coverage_pct'))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Book Fetch Failure Distribution",
+            "",
+            "| source | count |",
+            "| --- | ---: |",
+        ]
+    )
+    for row in _list(health.get("book_fetch_failure_distribution")):
+        lines.append(f"| {row.get('source')} | {row.get('count')} |")
+
+    lines.extend(
+        [
+            "",
         "## Edge By Event Type",
         "",
         "| event type | count | signal ok | avg net edge | max net edge | avg evidence |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
-    ]
+        ]
+    )
     for row in _list(report.get("edge_by_event_type")):
         lines.append(
             f"| {row.get('event_type')} | {row.get('count')} | {row.get('signal_ok_count')} | "
@@ -264,14 +337,15 @@ def _markdown_report(report: dict[str, object]) -> str:
             "",
             "## Portfolio Risk",
             "",
-            "| bankroll | open positions | total exposure | exposure % | unrealized PnL | unrealized % | circuit breaker |",
-            "| ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| bankroll | open positions | remaining slots | total exposure | exposure % | remaining capacity | unrealized PnL | unrealized % | circuit breaker |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     portfolio = _dict(report.get("portfolio_risk"))
     lines.append(
-        f"| {_fmt(portfolio.get('bankroll'))} | {portfolio.get('open_positions', 0)} | "
+        f"| {_fmt(portfolio.get('bankroll'))} | {portfolio.get('open_positions', 0)} | {portfolio.get('remaining_position_slots', 0)} | "
         f"{_fmt(portfolio.get('total_exposure'))} | {_fmt_pct(portfolio.get('total_exposure_pct'))} | "
+        f"{_fmt(portfolio.get('remaining_total_risk_capacity'))} | "
         f"{_fmt(portfolio.get('unrealized_pnl'))} | {_fmt_pct(portfolio.get('unrealized_pnl_pct'))} | "
         f"{portfolio.get('circuit_breaker_active')} |"
     )
@@ -288,6 +362,19 @@ def _markdown_report(report: dict[str, object]) -> str:
         )
         for event_type, exposure in exposure_by_event_type.items():
             lines.append(f"| {event_type} | {_fmt(exposure)} |")
+    exposure_by_platform = _dict(portfolio.get("exposure_by_platform"))
+    if exposure_by_platform:
+        lines.extend(
+            [
+                "",
+                "### Exposure By Platform",
+                "",
+                "| platform | exposure |",
+                "| --- | ---: |",
+            ]
+        )
+        for platform, exposure in exposure_by_platform.items():
+            lines.append(f"| {platform} | {_fmt(exposure)} |")
 
     lines.extend(
         [
@@ -310,6 +397,7 @@ def _markdown_report(report: dict[str, object]) -> str:
 def _html_report(report: dict[str, object]) -> str:
     counts = _dict(report.get("counts"))
     portfolio = _dict(report.get("portfolio_risk"))
+    health = _dict(report.get("health"))
     latest_markets = _list(report.get("latest_markets"))
     top_edges = _list(report.get("top_edges"))
     edge_rows = _list(report.get("edge_by_event_type"))
@@ -355,15 +443,31 @@ def _html_report(report: dict[str, object]) -> str:
         "</section>",
         '<section class="split">',
         '<div class="panel">',
+        "<h2>Data Quality</h2>",
+        '<div class="risk-line"><span>Evidence success</span><strong>' + _fmt_pct(health.get("evidence_success_rate")) + "</strong></div>",
+        '<div class="risk-line"><span>Complete books</span><strong>' + _fmt_pct(health.get("book_complete_rate")) + "</strong></div>",
+        '<div class="risk-line"><span>Executable snapshots</span><strong>' + _fmt_pct(health.get("executable_snapshot_rate")) + "</strong></div>",
+        '<div class="risk-line"><span>Indicative snapshots</span><strong>' + _e(health.get("indicative_snapshot_count", 0)) + "</strong></div>",
+        '<div class="risk-line"><span>Unsupported markets</span><strong>' + _e(health.get("unsupported_market_count", 0)) + "</strong></div>",
+        "<h2>Profile Settlement Coverage</h2>",
+        _profile_coverage_list(_list(health.get("profile_settlement_coverage"))),
+        "<h2>Book Fetch Failure Distribution</h2>",
+        _source_count_list(_list(health.get("book_fetch_failure_distribution")), "No book fetch failures."),
+        "</div>",
+        '<div class="panel">',
         "<h2>Portfolio Risk</h2>",
         '<div class="risk-line"><span>Bankroll</span><strong>' + _fmt(portfolio.get("bankroll")) + "</strong></div>",
+        '<div class="risk-line"><span>Remaining slots</span><strong>' + _e(portfolio.get("remaining_position_slots", 0)) + "</strong></div>",
         '<div class="risk-line"><span>Total exposure</span><strong>' + _fmt(portfolio.get("total_exposure")) + "</strong></div>",
+        '<div class="risk-line"><span>Remaining capacity</span><strong>' + _fmt(portfolio.get("remaining_total_risk_capacity")) + "</strong></div>",
         _bar("Exposure", portfolio.get("total_exposure_pct"), 1.0),
         _bar("Unrealized PnL", portfolio.get("unrealized_pnl_pct"), 0.05, signed=True),
         "</div>",
         '<div class="panel">',
         "<h2>Exposure By Event Type</h2>",
         _exposure_list(exposure_by_event_type),
+        "<h2>Exposure By Platform</h2>",
+        _exposure_list(_dict(portfolio.get("exposure_by_platform"))),
         "</div>",
         "</section>",
         '<section class="panel">',
@@ -628,6 +732,33 @@ def _target_source_list(target_sources: dict[str, object]) -> str:
     return "\n".join(rows)
 
 
+def _profile_coverage_list(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<p class="empty">No profile coverage.</p>'
+    items: list[str] = []
+    for row in rows:
+        items.append(
+            '<div class="risk-line">'
+            f'<span>{_e(row.get("model_profile"))}</span>'
+            f'<strong>{_e(row.get("settled_samples"))}/{_e(row.get("samples"))} ({_fmt_pct(row.get("settlement_coverage_pct"))})</strong>'
+            "</div>"
+        )
+    return "\n".join(items)
+
+
+def _source_count_list(rows: list[dict[str, object]], empty_text: str) -> str:
+    if not rows:
+        return f'<p class="empty">{_e(empty_text)}</p>'
+    items: list[str] = []
+    for row in rows:
+        items.append(
+            '<div class="risk-line">'
+            f'<span>{_e(row.get("source"))}</span><strong>{_e(row.get("count"))}</strong>'
+            "</div>"
+        )
+    return "\n".join(items)
+
+
 def _market_table(rows: list[dict[str, object]]) -> str:
     return _table(
         ["slug", "event type", "platform", "preferred", "model", "price", "net edge", "evidence", "signal", "market"],
@@ -726,9 +857,10 @@ def _e(value: object) -> str:
 def _latest_snapshots_by_slug(snapshots: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     latest: dict[str, dict[str, object]] = {}
     for row in snapshots:
-        slug = str(row.get("slug") or "")
+        payload = _snapshot_payload(row)
+        slug = str(payload.get("slug") or "")
         if slug:
-            latest[slug] = _snapshot_payload(row)
+            latest[slug] = payload
     return latest
 
 
@@ -782,6 +914,7 @@ def _market_row(row: dict[str, object]) -> dict[str, object]:
         "market_ok": row.get("market_ok"),
         "evidence_score": _float(row.get("evidence_score")),
         "p_model": _float(row.get("p_model")),
+        "evidence_matched_items": row.get("evidence_matched_items", []),
     }
 
 
@@ -808,19 +941,7 @@ def _recent_alerts(alerts: list[dict[str, object]], limit: int) -> list[dict[str
 
 
 def _snapshot_payload(row: dict[str, object]) -> dict[str, object]:
-    raw = row.get("raw_json")
-    if isinstance(raw, str) and raw:
-        try:
-            payload = json.loads(raw)
-            if isinstance(payload, dict):
-                return payload
-        except json.JSONDecodeError:
-            pass
-    return row
-
-
-def _row_dict(row: sqlite3.Row) -> dict[str, object]:
-    return {key: row[key] for key in row.keys()}
+    return storage_row_payload(row)
 
 
 def _avg(values: list[float]) -> float | None:
@@ -855,3 +976,75 @@ def _fmt_pct(value: object) -> str:
     number = _float(value)
     return "none" if number is None else f"{number:.2%}"
 
+def _evidence_success_rate(snapshots: list[dict[str, object]]) -> float | None:
+    if not snapshots:
+        return None
+    success = sum(1 for row in snapshots if SnapshotRecord.from_mapping(_snapshot_payload(row)).evidence_mode == "source")
+    return round(success / len(snapshots), 4)
+
+
+def _book_complete_rate(snapshots: list[dict[str, object]]) -> float | None:
+    if not snapshots:
+        return None
+    complete = sum(1 for row in snapshots if SnapshotRecord.from_mapping(_snapshot_payload(row)).book_status == "complete")
+    return round(complete / len(snapshots), 4)
+
+
+def _executable_snapshot_rate(snapshots: list[dict[str, object]]) -> float | None:
+    if not snapshots:
+        return None
+    executable = 0
+    for row in snapshots:
+        snapshot = SnapshotRecord.from_mapping(_snapshot_payload(row))
+        side = snapshot.preferred_side or snapshot.model_side
+        if snapshot.ask_source_for_side(side) == "book":
+            executable += 1
+    return round(executable / len(snapshots), 4)
+
+
+def _indicative_snapshot_count(snapshots: list[dict[str, object]]) -> int:
+    return sum(1 for row in snapshots if SnapshotRecord.from_mapping(_snapshot_payload(row)).book_status != "complete")
+
+
+def _unsupported_market_count(snapshots: list[dict[str, object]]) -> int:
+    count = 0
+    for row in snapshots:
+        payload = _snapshot_payload(row)
+        if str(payload.get("platform") or "unknown") == "unknown":
+            count += 1
+            continue
+        reasons = payload.get("market_reasons")
+        if isinstance(reasons, list) and any(str(reason) == "unsupported_platform" for reason in reasons):
+            count += 1
+    return count
+
+
+def _profile_settlement_coverage(samples) -> list[dict[str, object]]:
+    grouped: dict[str, list[object]] = defaultdict(list)
+    for sample in samples:
+        grouped[str(getattr(sample, "model_profile", None) or "unknown")].append(sample)
+
+    rows: list[dict[str, object]] = []
+    for profile in sorted(grouped):
+        group = grouped[profile]
+        settled = [sample for sample in group if getattr(sample, "target_source", None) == "settlement_file"]
+        rows.append(
+            {
+                "model_profile": profile,
+                "samples": len(group),
+                "settled_samples": len(settled),
+                "settlement_coverage_pct": round(len(settled) / len(group), 4) if group else None,
+            }
+        )
+    return rows
+
+
+def _book_fetch_failure_distribution(snapshots: list[dict[str, object]]) -> list[dict[str, object]]:
+    counter: Counter[str] = Counter()
+    for row in snapshots:
+        snapshot = SnapshotRecord.from_mapping(_snapshot_payload(row))
+        side = snapshot.preferred_side or snapshot.model_side
+        source = snapshot.ask_source_for_side(side)
+        if source and source != "book":
+            counter[source] += 1
+    return [{"source": source, "count": count} for source, count in counter.most_common()]

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
 from bot.config import BotConfig
-from bot.portfolio_risk import filter_shadow_fills_for_portfolio, load_portfolio_risk_state
+from bot.risk_manager import filter_shadow_fills_for_portfolio, load_portfolio_risk_state
 from bot.storage import WatchlistStore
+from bot.settlements import Settlement
 
 
 class PortfolioRiskTests(unittest.TestCase):
@@ -25,6 +28,9 @@ class PortfolioRiskTests(unittest.TestCase):
             )
 
         self.assertEqual(state.total_exposure, 20.0)
+        self.assertEqual(state.remaining_position_slots, 9)
+        self.assertEqual(state.remaining_total_risk_capacity, 180.0)
+        self.assertEqual(state.exposure_by_platform["streaming"], 20.0)
         self.assertEqual(accepted, [])
 
     def test_circuit_breaker_blocks_new_candidates_after_portfolio_loss(self) -> None:
@@ -45,7 +51,50 @@ class PortfolioRiskTests(unittest.TestCase):
 
         self.assertTrue(state.circuit_breaker_active)
         self.assertIn("portfolio_loss_limit", state.circuit_breaker_reasons)
+        self.assertEqual(state.loss_limit_headroom, 0.0)
         self.assertEqual(accepted, [])
+
+    def test_settled_position_is_not_counted_as_open_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "watchlist.sqlite")
+            store = WatchlistStore(db_path)
+            store.insert_snapshots([_snapshot("existing", "content_release", 0.45)])
+            store.insert_shadow_fills([_fill("existing", "content_release", 20.0)])
+            settlements = [
+                Settlement(
+                    slug="existing",
+                    side="BUY_NO",
+                    status="settled",
+                    close_price=None,
+                    winning_side="BUY_NO",
+                    timestamp_utc="2026-05-01T00:00:00+00:00",
+                    note=None,
+                )
+            ]
+
+            state = load_portfolio_risk_state(db_path, BotConfig(), settlements)
+
+        self.assertEqual(state.open_positions, 0)
+        self.assertEqual(state.remaining_position_slots, 10)
+        self.assertEqual(state.total_exposure, 0.0)
+
+    def test_state_load_error_blocks_new_candidates_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "broken.sqlite")
+            with closing(sqlite3.connect(db_path)) as connection:
+                connection.execute("CREATE TABLE placeholder (id INTEGER PRIMARY KEY)")
+                connection.commit()
+
+            accepted, state = filter_shadow_fills_for_portfolio(
+                db_path,
+                [_fill("candidate", "content_release", 20.0)],
+                BotConfig(),
+            )
+
+        self.assertEqual(accepted, [])
+        self.assertTrue(state.circuit_breaker_active)
+        self.assertIn("portfolio_state_unavailable", state.circuit_breaker_reasons)
+        self.assertEqual(state.state_load_error, "OperationalError")
 
 
 def _snapshot(slug: str, event_type: str, no_mid: float) -> dict[str, object]:

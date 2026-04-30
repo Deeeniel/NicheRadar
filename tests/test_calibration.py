@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bot.calibration import build_calibration_report, format_calibration_report, load_calibration_samples
-from bot.shadow_replay import Settlement
+from bot.backtest.calibration import build_calibration_report, format_calibration_report, load_calibration_samples
+from bot.settlements import Settlement
 from bot.storage import WatchlistStore
 
 

@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bot.settlement_validation import format_settlement_validation, validate_settlements
-from bot.shadow_replay import Settlement
+from bot.backtest.validation import format_settlement_validation, validate_settlements
+from bot.settlements import Settlement
 from bot.storage import WatchlistStore
 
 
@@ -35,7 +35,11 @@ class SettlementValidationTests(unittest.TestCase):
         self.assertEqual(report["covered_fill_count"], 1)
         self.assertEqual(report["unsettled_fill_count"], 1)
         self.assertEqual(report["coverage_pct"], 0.5)
-        self.assertTrue(any(line.startswith("settlement_validation") for line in format_settlement_validation(report)))
+        self.assertEqual(report["coverage_by_slug"][0]["slug"], "market-a")
+        self.assertEqual(report["coverage_by_slug"][0]["coverage_pct"], 1.0)
+        lines = format_settlement_validation(report)
+        self.assertTrue(any(line.startswith("settlement_validation") for line in lines))
+        self.assertTrue(any(line.startswith("coverage_by_slug slug=market-a") for line in lines))
 
     def test_detects_duplicates_unknown_slug_and_price_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -78,7 +82,34 @@ class SettlementValidationTests(unittest.TestCase):
 
         self.assertFalse(report["valid"])
         self.assertEqual({issue["code"] for issue in report["errors"]}, {"winning_side_close_price_conflict", "duplicate_settlement"})
-        self.assertEqual(report["warnings"][0]["code"], "unknown_slug")
+        self.assertEqual({issue["code"] for issue in report["warnings"]}, {"unknown_slug", "missing_timestamp"})
+        self.assertEqual(report["issue_counts"]["errors"]["duplicate_settlement"], 1)
+        self.assertEqual(report["issue_counts"]["warnings"]["missing_timestamp"], 3)
+
+    def test_warns_for_slug_wide_multi_side_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "watchlist.sqlite")
+            store = WatchlistStore(db_path)
+            store.insert_shadow_fills([_fill("market-a", "BUY_YES"), _fill("market-a", "BUY_NO")])
+
+            report = validate_settlements(
+                db_path,
+                [
+                    Settlement(
+                        slug="market-a",
+                        side=None,
+                        status="settled",
+                        close_price=None,
+                        winning_side="BUY_NO",
+                        timestamp_utc="2026-06-30T00:00:00+00:00",
+                        note=None,
+                    )
+                ],
+            )
+
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["warnings"][0]["code"], "slug_wide_settlement_on_multi_side_market")
+        self.assertEqual(report["coverage_by_slug"][0]["covered_fill_count"], 2)
 
 
 def _fill(slug: str, side: str) -> dict[str, object]:

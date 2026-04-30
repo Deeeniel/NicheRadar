@@ -69,6 +69,27 @@ class MarketScannerTests(unittest.TestCase):
         self.assertEqual(updated.no_ask, 0.59)
         self.assertEqual(updated.metadata["yes_token_id"], "yes-token")
         self.assertEqual(updated.metadata["no_token_id"], "no-token")
+        self.assertEqual(updated.metadata["book_status"], "complete")
+        self.assertEqual(updated.metadata["yes_ask_source"], "book")
+        self.assertEqual(updated.metadata["no_ask_source"], "book")
+
+    def test_rules_field_prefers_explicit_rules_over_description(self) -> None:
+        market = _market_from_gamma(
+            {
+                "id": "1",
+                "question": "Will Example happen?",
+                "description": "Description text",
+                "rules": "Explicit rules text",
+                "endDate": "2026-05-01T00:00:00Z",
+                "volumeNum": "1000",
+                "outcomes": '["No", "Yes"]',
+                "clobTokenIds": '["no-token", "yes-token"]',
+                "outcomePrices": '["0.58", "0.42"]',
+            }
+        )
+
+        assert market is not None
+        self.assertEqual(market.rules, "Explicit rules text")
 
 
 if __name__ == "__main__":

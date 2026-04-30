@@ -77,6 +77,9 @@ class Evidence:
     cadence_score: float | None = None
     partner_score: float | None = None
     source_reliability: float | None = None
+    bearish_hits_30d: int | None = None
+    bearish_score: float | None = None
+    matched_items: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -90,6 +93,7 @@ class Signal:
     max_entry_price: float
     confidence: float
     reasons: list[str]
+    profile_name: str = ""
 
 
 @dataclass

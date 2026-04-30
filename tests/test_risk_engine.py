@@ -5,7 +5,7 @@ import unittest
 
 from bot.config import BotConfig
 from bot.models import Market, ParsedMarket
-from bot.risk_engine import allow_market
+from bot.risk_manager import allow_market
 
 
 class RiskEngineTests(unittest.TestCase):

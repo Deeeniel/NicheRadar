@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from bot.shadow import build_shadow_fills
+from bot.execution import build_shadow_fills
 
 
 class ShadowFillTests(unittest.TestCase):
@@ -19,6 +19,7 @@ class ShadowFillTests(unittest.TestCase):
                     "market_ok": True,
                     "signal_ok": True,
                     "no_ask": 0.45,
+                    "no_ask_source": "book",
                     "max_entry_price": 0.50,
                     "net_edge": 0.05,
                 }
@@ -39,6 +40,7 @@ class ShadowFillTests(unittest.TestCase):
                     "market_ok": True,
                     "signal_ok": False,
                     "yes_ask": 0.45,
+                    "yes_ask_source": "book",
                     "max_entry_price": 0.50,
                 }
             ]
@@ -56,6 +58,7 @@ class ShadowFillTests(unittest.TestCase):
                     "market_ok": False,
                     "signal_ok": True,
                     "yes_ask": 0.45,
+                    "yes_ask_source": "book",
                     "max_entry_price": 0.50,
                 }
             ]
@@ -73,6 +76,25 @@ class ShadowFillTests(unittest.TestCase):
                     "market_ok": True,
                     "signal_ok": True,
                     "yes_ask": 0.03,
+                    "yes_ask_source": "book",
+                    "max_entry_price": 0.50,
+                }
+            ]
+        )
+
+        self.assertEqual(fills, [])
+
+    def test_skips_shadow_fill_when_ask_is_not_from_book(self) -> None:
+        fills = build_shadow_fills(
+            [
+                {
+                    "slug": "market",
+                    "preferred_side": "BUY_NO",
+                    "model_side": "BUY_NO",
+                    "market_ok": True,
+                    "signal_ok": True,
+                    "no_ask": 0.45,
+                    "no_ask_source": "derived_complement",
                     "max_entry_price": 0.50,
                 }
             ]

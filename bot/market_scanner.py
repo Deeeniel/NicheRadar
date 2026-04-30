@@ -115,7 +115,7 @@ def _market_from_gamma(row: dict[str, object]) -> Market | None:
         market_id=str(row.get("id")),
         title=question,
         description=str(row.get("description") or ""),
-        rules=str(row.get("description") or ""),
+        rules=_rule_text(row),
         category=str(row.get("category") or ""),
         closes_at=datetime.fromisoformat(str(end_date).replace("Z", "+00:00")),
         volume=_to_float(row.get("volumeNum") or row.get("volume")),
@@ -135,6 +135,9 @@ def _market_from_gamma(row: dict[str, object]) -> Market | None:
             "best_ask": row.get("bestAsk"),
             "last_trade_price": row.get("lastTradePrice"),
             "spread": row.get("spread"),
+            "book_status": "gamma_only",
+            "yes_ask_source": "gamma_outcome" if yes_ask > 0 else "missing",
+            "no_ask_source": "gamma_outcome" if no_ask > 0 and no_mid > 0 else ("derived_complement" if no_ask > 0 else "missing"),
         },
     )
 
@@ -152,6 +155,7 @@ def _apply_book_snapshot(client: PolymarketApiClient, market: Market) -> Market:
             market.yes_bid = best_yes_bid
         if best_yes_ask > 0:
             market.yes_ask = best_yes_ask
+            market.metadata["yes_ask_source"] = "book"
 
         market.metadata["yes_book_timestamp"] = yes_book.get("timestamp")
         market.metadata["yes_last_trade_price"] = yes_book.get("last_trade_price")
@@ -166,13 +170,24 @@ def _apply_book_snapshot(client: PolymarketApiClient, market: Market) -> Market:
             market.no_bid = best_no_bid
         if best_no_ask > 0:
             market.no_ask = best_no_ask
+            market.metadata["no_ask_source"] = "book"
 
         market.metadata["no_book_timestamp"] = no_book.get("timestamp")
         market.metadata["no_last_trade_price"] = no_book.get("last_trade_price")
+        market.metadata["book_status"] = "complete"
     else:
         market.no_bid = max(0.0, round(1 - market.yes_ask, 4))
         market.no_ask = max(0.0, round(1 - market.yes_bid, 4))
+        market.metadata["book_status"] = "partial"
     return market
+
+
+def _rule_text(row: dict[str, object]) -> str:
+    for key in ("rules", "resolutionCriteria", "resolutionSource", "resolution"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return str(row.get("description") or "")
 
 
 def _best_price(levels: object, choose) -> float:

@@ -4,7 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bot.shadow_replay import Settlement, replay_shadow_pnl
+from bot.backtest.replay import format_shadow_replay_report, replay_shadow_pnl
+from bot.settlements import Settlement
 from bot.storage import WatchlistStore
 
 
@@ -28,6 +29,8 @@ class ShadowReplayTests(unittest.TestCase):
         self.assertEqual(records[0]["event_type"], "content_release")
         self.assertEqual(records[0]["pnl"], 0.04)
         self.assertEqual(replay["summary_by_event_type"][0]["unrealized_pnl"], 0.04)
+        self.assertEqual(replay["summary_by_status"][0]["status"], "open_marked")
+        self.assertEqual(replay["diagnostics"]["open_marked_count"], 1)
 
     def test_settlement_closes_position_and_sets_realized_pnl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -58,6 +61,9 @@ class ShadowReplayTests(unittest.TestCase):
         self.assertEqual(record["pnl"], 0.54)
         self.assertEqual(summary["closed_count"], 1)
         self.assertEqual(summary["realized_pnl"], 0.54)
+        self.assertEqual(replay["summary_by_close_source"][0]["close_source"], "settlement_file")
+        self.assertEqual(replay["diagnostics"]["closed_or_settled_count"], 1)
+        self.assertTrue(any(line.startswith("shadow_diagnostics") for line in format_shadow_replay_report(replay)))
 
 
 def _snapshot(no_mid: float) -> dict[str, object]:

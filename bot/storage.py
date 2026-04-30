@@ -6,6 +6,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from bot.settlements import Settlement, settlement_close_price
+
 
 class WatchlistStore:
     def __init__(self, path: str) -> None:
@@ -22,11 +24,13 @@ class WatchlistStore:
                 INSERT INTO watchlist_snapshots (
                     timestamp_utc, slug, label, market_id, title, preferred_side,
                     preferred_price, in_target_band, yes_bid, yes_ask, yes_mid,
-                    no_bid, no_ask, no_mid, evidence_score, evidence_confidence,
+                    no_bid, no_ask, no_mid, subject, platform, event_type,
+                    yes_spread, no_spread, book_status, yes_ask_source, no_ask_source,
+                    evidence_score, evidence_confidence, evidence_mode,
                     model_side, p_model, p_mid, edge, net_edge, signal_ok,
                     market_ok, raw_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [_snapshot_row(snapshot) for snapshot in snapshots],
             )
@@ -44,9 +48,9 @@ class WatchlistStore:
                     mode, source_url, source_type, score, confidence,
                     recent_entries_30d, keyword_hits_30d, latest_entry_age_days,
                     preheat_score, cadence_score, partner_score, source_reliability,
-                    raw_json
+                    matched_items_json, raw_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -74,15 +78,56 @@ class WatchlistStore:
         with closing(self._connect()) as connection:
             connection.executemany(
                 """
-                INSERT INTO shadow_fills (
-                    timestamp_utc, slug, label, market_id, side,
-                    fill_price, max_entry_price, net_edge, reason, raw_json
+                INSERT OR IGNORE INTO shadow_fills (
+                    timestamp_utc, slug, label, market_id, event_type, platform, side,
+                    fill_price, risk_amount, share_quantity, max_entry_price, net_edge, reason,
+                    snapshot_timestamp_utc,
+                    position_status, closed_at_utc, close_source, close_price, raw_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [_shadow_fill_row(fill) for fill in fills],
             )
             connection.commit()
+
+    def apply_settlements(self, settlements: list[Settlement]) -> int:
+        if not settlements:
+            return 0
+        updated = 0
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, slug, side
+                FROM shadow_fills
+                WHERE COALESCE(position_status, 'open') = 'open'
+                ORDER BY id
+                """
+            ).fetchall()
+            for fill_id, slug, side in rows:
+                for settlement in settlements:
+                    if settlement.slug != slug:
+                        continue
+                    if settlement.side is not None and settlement.side != side:
+                        continue
+                    close_price = settlement_close_price(settlement, str(side))
+                    connection.execute(
+                        """
+                        UPDATE shadow_fills
+                        SET position_status = ?, closed_at_utc = ?, close_source = ?, close_price = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            settlement.status,
+                            settlement.timestamp_utc,
+                            "settlement_file",
+                            close_price,
+                            fill_id,
+                        ),
+                    )
+                    updated += 1
+                    break
+            connection.commit()
+        return updated
 
     def filter_new_shadow_fills(self, fills: list[dict[str, object]]) -> list[dict[str, object]]:
         if not fills:
@@ -93,7 +138,12 @@ class WatchlistStore:
                 slug = fill.get("slug")
                 side = fill.get("side")
                 exists = connection.execute(
-                    "SELECT 1 FROM shadow_fills WHERE slug = ? AND side = ? LIMIT 1",
+                    """
+                    SELECT 1
+                    FROM shadow_fills
+                    WHERE slug = ? AND side = ? AND COALESCE(position_status, 'open') = 'open'
+                    LIMIT 1
+                    """,
                     (slug, side),
                 ).fetchone()
                 if exists is None:
@@ -130,9 +180,9 @@ class WatchlistStore:
                         "unrealized_pnl_pct": pnl_pct,
                         "snapshot_timestamp_utc": snapshot.get("timestamp_utc"),
                     }
-                    connection.execute(
+                    cursor = connection.execute(
                         """
-                        INSERT INTO shadow_marks (
+                        INSERT OR IGNORE INTO shadow_marks (
                             fill_id, timestamp_utc, slug, market_id, side, fill_price,
                             mark_price, unrealized_pnl, unrealized_pnl_pct,
                             snapshot_timestamp_utc, raw_json
@@ -153,7 +203,7 @@ class WatchlistStore:
                             json.dumps(mark, ensure_ascii=True),
                         ),
                     )
-                    inserted += 1
+                    inserted += cursor.rowcount
             connection.commit()
         return inserted
 
@@ -180,8 +230,17 @@ class WatchlistStore:
                     no_bid REAL,
                     no_ask REAL,
                     no_mid REAL,
+                    subject TEXT,
+                    platform TEXT,
+                    event_type TEXT,
+                    yes_spread REAL,
+                    no_spread REAL,
+                    book_status TEXT,
+                    yes_ask_source TEXT,
+                    no_ask_source TEXT,
                     evidence_score REAL,
                     evidence_confidence REAL,
+                    evidence_mode TEXT,
                     model_side TEXT,
                     p_model REAL,
                     p_mid REAL,
@@ -217,11 +276,20 @@ class WatchlistStore:
                     slug TEXT NOT NULL,
                     label TEXT,
                     market_id TEXT,
+                    event_type TEXT,
+                    platform TEXT,
                     side TEXT NOT NULL,
                     fill_price REAL NOT NULL,
+                    risk_amount REAL,
+                    share_quantity REAL,
                     max_entry_price REAL NOT NULL,
                     net_edge REAL,
                     reason TEXT NOT NULL,
+                    snapshot_timestamp_utc TEXT,
+                    position_status TEXT,
+                    closed_at_utc TEXT,
+                    close_source TEXT,
+                    close_price REAL,
                     raw_json TEXT NOT NULL
                 );
 
@@ -248,6 +316,7 @@ class WatchlistStore:
                     cadence_score REAL,
                     partner_score REAL,
                     source_reliability REAL,
+                    matched_items_json TEXT,
                     raw_json TEXT NOT NULL
                 );
 
@@ -271,7 +340,23 @@ class WatchlistStore:
 
                 CREATE INDEX IF NOT EXISTS idx_shadow_marks_fill_time
                 ON shadow_marks(fill_id, timestamp_utc);
+
                 """
+            )
+            self._ensure_columns(
+                connection,
+                "watchlist_snapshots",
+                {
+                    "subject": "TEXT",
+                    "platform": "TEXT",
+                    "event_type": "TEXT",
+                    "yes_spread": "REAL",
+                    "no_spread": "REAL",
+                    "book_status": "TEXT",
+                    "yes_ask_source": "TEXT",
+                    "no_ask_source": "TEXT",
+                    "evidence_mode": "TEXT",
+                },
             )
             self._ensure_columns(
                 connection,
@@ -281,7 +366,47 @@ class WatchlistStore:
                     "cadence_score": "REAL",
                     "partner_score": "REAL",
                     "source_reliability": "REAL",
+                    "matched_items_json": "TEXT",
                 },
+            )
+            self._ensure_columns(
+                connection,
+                "shadow_fills",
+                {
+                    "event_type": "TEXT",
+                    "platform": "TEXT",
+                    "risk_amount": "REAL",
+                    "share_quantity": "REAL",
+                    "snapshot_timestamp_utc": "TEXT",
+                    "position_status": "TEXT",
+                    "closed_at_utc": "TEXT",
+                    "close_source": "TEXT",
+                    "close_price": "REAL",
+                },
+            )
+            self._create_unique_index_if_possible(
+                connection,
+                "uq_shadow_fills_open_slug_side",
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_shadow_fills_open_slug_side
+                ON shadow_fills(slug, side)
+                WHERE position_status = 'open' OR position_status IS NULL
+                """,
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_shadow_fills_open_positions
+                ON shadow_fills(position_status, slug, side, timestamp_utc)
+                """
+            )
+            self._create_unique_index_if_possible(
+                connection,
+                "uq_shadow_marks_fill_snapshot",
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_shadow_marks_fill_snapshot
+                ON shadow_marks(fill_id, snapshot_timestamp_utc)
+                WHERE snapshot_timestamp_utc IS NOT NULL
+                """,
             )
             connection.commit()
 
@@ -290,6 +415,17 @@ class WatchlistStore:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    def _create_unique_index_if_possible(
+        self,
+        connection: sqlite3.Connection,
+        index_name: str,
+        statement: str,
+    ) -> None:
+        try:
+            connection.execute(statement)
+        except sqlite3.IntegrityError:
+            connection.execute(f"DROP INDEX IF EXISTS {index_name}")
 
 
 def _snapshot_row(snapshot: dict[str, object]) -> tuple[Any, ...]:
@@ -308,8 +444,17 @@ def _snapshot_row(snapshot: dict[str, object]) -> tuple[Any, ...]:
         _float_or_none(snapshot.get("no_bid")),
         _float_or_none(snapshot.get("no_ask")),
         _float_or_none(snapshot.get("no_mid")),
+        snapshot.get("subject"),
+        snapshot.get("platform"),
+        snapshot.get("event_type"),
+        _float_or_none(snapshot.get("yes_spread")),
+        _float_or_none(snapshot.get("no_spread")),
+        snapshot.get("book_status"),
+        snapshot.get("yes_ask_source"),
+        snapshot.get("no_ask_source"),
         _float_or_none(snapshot.get("evidence_score")),
         _float_or_none(snapshot.get("evidence_confidence")),
+        snapshot.get("evidence_mode"),
         snapshot.get("model_side"),
         _float_or_none(snapshot.get("p_model")),
         _float_or_none(snapshot.get("p_mid")),
@@ -355,6 +500,7 @@ def _evidence_row(snapshot: dict[str, object]) -> tuple[Any, ...]:
         _float_or_none(snapshot.get("evidence_cadence_score")),
         _float_or_none(snapshot.get("evidence_partner_score")),
         _float_or_none(snapshot.get("evidence_source_reliability")),
+        json.dumps(snapshot.get("evidence_matched_items", []), ensure_ascii=True),
         json.dumps(
             {
                 "reasons": snapshot.get("evidence_reasons", []),
@@ -364,6 +510,7 @@ def _evidence_row(snapshot: dict[str, object]) -> tuple[Any, ...]:
                 "cadence_score": snapshot.get("evidence_cadence_score"),
                 "partner_score": snapshot.get("evidence_partner_score"),
                 "source_reliability": snapshot.get("evidence_source_reliability"),
+                "matched_items": snapshot.get("evidence_matched_items", []),
             },
             ensure_ascii=True,
         ),
@@ -376,11 +523,20 @@ def _shadow_fill_row(fill: dict[str, object]) -> tuple[Any, ...]:
         fill.get("slug"),
         fill.get("label"),
         fill.get("market_id"),
+        fill.get("event_type"),
+        fill.get("platform"),
         fill.get("side"),
         _float_or_none(fill.get("fill_price")),
+        _float_or_none(fill.get("risk_amount") or fill.get("portfolio_risk_amount")),
+        _float_or_none(fill.get("share_quantity")),
         _float_or_none(fill.get("max_entry_price")),
         _float_or_none(fill.get("net_edge")),
         fill.get("reason"),
+        fill.get("snapshot_timestamp_utc"),
+        fill.get("position_status") or "open",
+        fill.get("closed_at_utc"),
+        fill.get("close_source"),
+        _float_or_none(fill.get("close_price")),
         json.dumps(fill, ensure_ascii=True),
     )
 

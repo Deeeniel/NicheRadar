@@ -159,6 +159,35 @@ class SignalEngineTests(unittest.TestCase):
         self.assertIn("model_profile=ipo_event", signal.reasons)
         self.assertEqual(signal.side, "BUY_NO")
 
+    def test_buy_no_uses_no_side_spread_penalty(self) -> None:
+        market = Market(
+            market_id="1",
+            title="Will Example be released?",
+            description="",
+            rules="",
+            category="",
+            closes_at=datetime.now(timezone.utc),
+            volume=1000,
+            yes_bid=0.70,
+            yes_ask=0.90,
+            no_bid=0.08,
+            no_ask=0.30,
+        )
+        parsed = ParsedMarket(
+            market=market,
+            event_type="content_release",
+            subject="Example",
+            platform="openai",
+            action="release",
+            days_to_expiry=5,
+        )
+        evidence = Evidence(score=-1.0, confidence=0.9, reasons=[])
+
+        signal = build_signal(parsed, evidence, BotConfig())
+
+        self.assertEqual(signal.side, "BUY_NO")
+        self.assertIn("spread_penalty=0.0800", signal.reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

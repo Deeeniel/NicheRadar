@@ -21,7 +21,7 @@ class ReportingTests(unittest.TestCase):
             html_path = str(Path(directory) / "dashboard.html")
             store = WatchlistStore(db_path)
             snapshot = _snapshot()
-            store.insert_snapshots([snapshot])
+            store.insert_snapshots([snapshot, _snapshot(slug="market-2", platform="unknown", book_status="indicative", no_ask_source="fallback")])
             store.insert_alerts(
                 [
                     {
@@ -45,28 +45,47 @@ class ReportingTests(unittest.TestCase):
             report_text = Path(report_path).read_text(encoding="utf-8")
             html_text = Path(html_path).read_text(encoding="utf-8")
 
-            self.assertEqual(report["counts"]["snapshots"], 1)
+            self.assertEqual(report["counts"]["snapshots"], 2)
             self.assertEqual(report["edge_by_event_type"][0]["event_type"], "content_release")
             self.assertEqual(report["edge_by_event_type"][0]["avg_net_edge"], 0.02)
             self.assertEqual(report["alert_summary"][0]["reason"], "signal_turned_ok")
             self.assertEqual(report["shadow_summary_by_event_type"][0]["unrealized_pnl"], -0.005)
+            self.assertEqual(report["health"]["book_complete_rate"], 0.5)
+            self.assertEqual(report["health"]["executable_snapshot_rate"], 0.5)
+            self.assertEqual(report["health"]["indicative_snapshot_count"], 1)
+            self.assertEqual(report["health"]["unsupported_market_count"], 1)
+            self.assertEqual(report["health"]["profile_settlement_coverage"][0]["model_profile"], "music_release")
+            self.assertEqual(report["health"]["profile_settlement_coverage"][0]["settlement_coverage_pct"], 0.0)
+            self.assertEqual(report["health"]["book_fetch_failure_distribution"][0], {"source": "fallback", "count": 1})
             self.assertTrue(report_text.startswith("# PolyMarket Shadow Report"))
             self.assertIn("<title>PolyMarket Shadow Dashboard</title>", html_text)
             self.assertIn("Portfolio Risk", html_text)
+            self.assertIn("Data Quality", html_text)
+            self.assertIn("Profile Settlement Coverage", html_text)
+            self.assertIn("Book Fetch Failure Distribution", html_text)
             self.assertIn("Latest Markets", html_text)
             self.assertIn("Market", html_text)
             self.assertTrue(any(line.startswith("edge_summary") for line in format_dashboard_report(report)))
+            self.assertTrue(any(line.startswith("data_quality") for line in format_dashboard_report(report)))
+            self.assertTrue(any(line.startswith("profile_settlement_coverage") for line in format_dashboard_report(report)))
+            self.assertTrue(any(line.startswith("book_fetch_failure") for line in format_dashboard_report(report)))
 
 
-def _snapshot() -> dict[str, object]:
+def _snapshot(
+    *,
+    slug: str = "market",
+    platform: str = "streaming",
+    book_status: str = "complete",
+    no_ask_source: str = "book",
+) -> dict[str, object]:
     return {
         "timestamp_utc": "2026-04-27T00:01:00+00:00",
-        "slug": "market",
+        "slug": slug,
         "label": "Market",
         "market_id": "1",
         "title": "New Artist Album before GTA VI?",
         "subject": "Artist",
-        "platform": "streaming",
+        "platform": platform,
         "event_type": "content_release",
         "preferred_side": "BUY_NO",
         "preferred_price": 0.455,
@@ -77,8 +96,14 @@ def _snapshot() -> dict[str, object]:
         "no_bid": 0.45,
         "no_ask": 0.46,
         "no_mid": 0.455,
+        "yes_spread": 0.01,
+        "no_spread": 0.01,
+        "book_status": book_status,
+        "yes_ask_source": "book",
+        "no_ask_source": no_ask_source,
         "evidence_score": 0.1,
         "evidence_confidence": 0.7,
+        "evidence_mode": "source",
         "model_side": "BUY_NO",
         "p_model": 0.45,
         "p_mid": 0.545,

@@ -100,6 +100,29 @@ class MarketParserTests(unittest.TestCase):
         assert gpt_parsed is not None
         self.assertEqual(gpt_parsed.platform, "openai")
 
+    def test_parses_release_signal_from_description_when_title_is_generic(self) -> None:
+        parsed = parse_market(
+            Market(
+                market_id="5",
+                title="Will Example happen before June 1?",
+                description="Resolves YES if OpenAI releases GPT-6 before the deadline.",
+                rules="Only public product release counts.",
+                category="",
+                closes_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                volume=1000,
+                yes_bid=0.40,
+                yes_ask=0.42,
+                no_bid=0.58,
+                no_ask=0.60,
+            ),
+            datetime(2026, 4, 27, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.platform, "openai")
+        self.assertEqual(parsed.event_type, "content_release")
+
 
 if __name__ == "__main__":
     unittest.main()

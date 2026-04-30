@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bot.backtest_dataset import load_backtest_samples
-from bot.shadow_replay import Settlement
+from bot.backtest.dataset import load_backtest_samples
+from bot.settlements import Settlement
 from bot.storage import WatchlistStore
 
 
@@ -53,6 +53,41 @@ class BacktestDatasetTests(unittest.TestCase):
         self.assertEqual(samples[0].target_price, 0.72)
         self.assertAlmostEqual(samples[0].target_yes_probability or 0, 0.28)
 
+    def test_multiple_snapshots_for_one_fill_produce_one_trade_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "watchlist.sqlite")
+            store = WatchlistStore(db_path)
+            store.insert_snapshots([_snapshot(), {**_snapshot(), "timestamp_utc": "2026-04-27T00:05:00+00:00"}])
+            store.insert_shadow_fills([_fill()])
+
+            samples = load_backtest_samples(db_path)
+
+        self.assertEqual(len(samples), 1)
+
+    def test_share_quantity_scales_realized_pnl_consistently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "watchlist.sqlite")
+            store = WatchlistStore(db_path)
+            store.insert_snapshots([_snapshot()])
+            store.insert_shadow_fills([_fill(share_quantity=10.0)])
+
+            samples = load_backtest_samples(
+                db_path,
+                [
+                    Settlement(
+                        slug="market",
+                        side=None,
+                        status="settled",
+                        close_price=None,
+                        winning_side="BUY_NO",
+                        timestamp_utc="2026-06-30T00:00:00+00:00",
+                        note=None,
+                    )
+                ],
+            )
+
+        self.assertEqual(samples[0].realized_pnl, 5.4)
+
 
 def _snapshot(no_mid: float = 0.45) -> dict[str, object]:
     yes_mid = round(1 - no_mid, 4)
@@ -92,8 +127,8 @@ def _snapshot(no_mid: float = 0.45) -> dict[str, object]:
     }
 
 
-def _fill() -> dict[str, object]:
-    return {
+def _fill(share_quantity: float | None = None) -> dict[str, object]:
+    payload = {
         "timestamp_utc": "2026-04-27T00:01:00+00:00",
         "slug": "market",
         "label": "Market",
@@ -105,6 +140,9 @@ def _fill() -> dict[str, object]:
         "reason": "ask_at_or_below_max_entry",
         "snapshot_timestamp_utc": "2026-04-27T00:00:00+00:00",
     }
+    if share_quantity is not None:
+        payload["share_quantity"] = share_quantity
+    return payload
 
 
 if __name__ == "__main__":
