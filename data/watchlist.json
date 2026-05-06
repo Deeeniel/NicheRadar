@@ -1,0 +1,50 @@
+[
+  {
+    "slug": "will-gpt-6-be-released",
+    "label": "GPT-6 before GTA VI",
+    "preferred_side": "BUY_YES",
+    "entry_band_low": 0.60,
+    "entry_band_high": 0.62,
+    "note": "Observe only. Consider YES only if price softens into the band."
+  },
+  {
+    "slug": "new-playboi-carti-album-before-gta-vi-421",
+    "label": "Playboi Carti new album before GTA VI",
+    "preferred_side": "BUY_NO",
+    "entry_band_low": 0.40,
+    "entry_band_high": 0.46,
+    "note": "Prefer NO while YES stays elevated without hard release evidence."
+  },
+  {
+    "slug": "new-rhianna-album-before-gta-vi-926",
+    "label": "Rihanna new album before GTA VI",
+    "preferred_side": "BUY_YES",
+    "entry_band_low": 0.50,
+    "entry_band_high": 0.53,
+    "note": "Need either better price or stronger catalyst."
+  },
+  {
+    "slug": "will-openai-not-ipo-by-december-31-2026",
+    "label": "OpenAI no IPO by Dec 31 2026",
+    "preferred_side": "BUY_NO",
+    "entry_band_low": 0.28,
+    "entry_band_high": 0.35,
+    "note": "Prefer NO only while IPO-related reporting remains dense and NO stays near the low-30c range."
+  },
+  {
+    "slug": "will-tesla-release-optimus-by-june-30-2026",
+    "label": "Tesla Optimus release by Jun 30 2026",
+    "preferred_side": "BUY_NO",
+    "entry_band_low": 0.93,
+    "entry_band_high": 0.96,
+    "note": "Only watch NO; public evidence still needs a clear commercial release definition."
+  },
+  {
+    "slug": "will-apple-release-a-macbook-with-cellular-connectivity-by-june-30",
+    "label": "Apple cellular MacBook by Jun 30",
+    "preferred_side": "BUY_NO",
+    "entry_band_low": 0.93,
+    "entry_band_high": 0.97,
+    "note": "Low-liquidity watch item; reports point to future cellular MacBook work, but timing is uncertain."
+  }
+]
