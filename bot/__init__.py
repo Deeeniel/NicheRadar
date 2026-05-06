@@ -1,1 +1,0 @@
-"""PolyMarket shadow bot package."""
